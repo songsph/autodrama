@@ -33,6 +33,17 @@ done
 SUDO=""
 [ "$(id -u)" -ne 0 ] && SUDO="sudo"
 
+# AutoDL 镜像的 conda 不在非登录 shell 的 PATH 里，这里自动找回来
+if ! command -v python3 >/dev/null 2>&1; then
+  for _p in /root/miniconda3/bin /opt/conda/bin /usr/local/miniconda3/bin; do
+    if [ -x "$_p/python3" ]; then
+      export PATH="$_p:$PATH"
+      echo "已把 $_p 加入 PATH"
+      break
+    fi
+  done
+fi
+
 echo "==> 0/6 环境自检"
 python3 --version || { echo "缺少 python3"; exit 1; }
 if command -v nvidia-smi >/dev/null 2>&1; then
