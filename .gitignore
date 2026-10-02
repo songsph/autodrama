@@ -1,0 +1,46 @@
+# ---- 安全：密钥绝不能进仓库 ----
+.env
+.env.*
+*.env
+!.env.example
+config/secrets.yaml
+*.key
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# ---- 运行时产物 ----
+projects/
+outputs/
+models/
+weights/
+.cache/
+*.log
+
+# ---- 大体积媒体（不进 git，用网盘/对象存储分发）----
+*.mp4
+*.wav
+*.mp3
+*.safetensors
+*.ckpt
+*.bin
+*.pt
+
+# ---- 编辑器 ----
+.vscode/
+.idea/
+.DS_Store
+
+# 凭据 / 账号信息：任何含这些字样的文件都绝不入库
+*密码*.txt
+*账号*.txt
+*密钥*.txt
+*credential*
+*secret*
+*.key
