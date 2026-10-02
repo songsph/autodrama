@@ -86,8 +86,10 @@ def run_wan(tasks: list, model_dir: str) -> None:
             "升级即可：pip install -U diffusers transformers accelerate"
         )
 
-    print(f"[wan] 加载模型：{model_dir}")
-    pipe = Pipe.from_pretrained(model_dir, torch_dtype=torch.bfloat16)
+    dtype_name = _env("AUTODRAMA_VIDEO_DTYPE", "bfloat16")
+    dtype = getattr(torch, dtype_name, torch.bfloat16)
+    print(f"[wan] 加载模型：{model_dir}（dtype={dtype_name}）")
+    pipe = Pipe.from_pretrained(model_dir, torch_dtype=dtype)
     try:
         pipe.enable_model_cpu_offload()      # 32G 显存也建议开，留余量给峰值
     except Exception:
@@ -96,32 +98,51 @@ def run_wan(tasks: list, model_dir: str) -> None:
     steps = int(_env("AUTODRAMA_STEPS", "28"))
     guidance = float(_env("AUTODRAMA_GUIDANCE", "7.0"))
 
+    def _is_oom(e: Exception) -> bool:
+        return isinstance(e, torch.OutOfMemoryError) or "out of memory" in str(e).lower()
+
     for i, t in enumerate(tasks, 1):
         out = t["out"]
         if Path(out).exists():
             print(f"[{i}/{len(tasks)}] 跳过（已存在）{out}")
             continue
-        try:
-            img = Image.open(t["image"]).convert("RGB")
-            fps = int(t.get("fps", FPS))
-            nf = _num_frames(t.get("duration", 3.0), fps)
-            print(f"[{i}/{len(tasks)}] 生成 {out}（{nf} 帧）")
-            res = pipe(
-                image=img,
-                prompt=t.get("prompt", ""),
-                negative_prompt=t.get("negative", ""),
-                num_frames=nf,
-                num_inference_steps=steps,
-                guidance_scale=guidance,
-                generator=torch.Generator("cuda").manual_seed(int(t.get("seed", 0)) or 0),
-            )
-            _save_video(res.frames[0], out, fps)
-        except Exception as e:
-            print(f"[error] {out} 生成失败：{e}")
-            traceback.print_exc()
-        finally:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+        img = Image.open(t["image"]).convert("RGB")
+        fps = int(t.get("fps", FPS))
+        nf = _num_frames(t.get("duration", 3.0), fps)
+        # 14B 模型在 32G 卡上很容易 OOM，准备好逐级降档：原分辨率 → 0.75 → 0.6 且帧数减半
+        plans = [
+            (img.width, img.height, nf),
+            (img.width * 3 // 4 // 8 * 8, img.height * 3 // 4 // 8 * 8, nf),
+            (img.width * 3 // 5 // 8 * 8, img.height * 3 // 5 // 8 * 8, max(9, nf // 2)),
+        ]
+        ok = False
+        for w, h, n in plans:
+            try:
+                print(f"[{i}/{len(tasks)}] 生成 {out}（{w}x{h}, {n} 帧）")
+                res = pipe(
+                    image=img.resize((w, h)),
+                    prompt=t.get("prompt", ""),
+                    negative_prompt=t.get("negative", ""),
+                    num_frames=n,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=torch.Generator("cuda").manual_seed(int(t.get("seed", 0)) or 0),
+                )
+                _save_video(res.frames[0], out, fps)
+                ok = True
+                break
+            except Exception as e:
+                if _is_oom(e):
+                    torch.cuda.empty_cache()
+                    print(f"    显存不足，降档重试（{w}x{h} → 更小尺寸）")
+                    continue
+                print(f"[error] {out} 生成失败：{e}")
+                traceback.print_exc()
+                break
+        if not ok:
+            print(f"[error] {out} 三档都失败，跳过该镜头")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 
 # ------------------------------------------------------------------ MiniMax H3
