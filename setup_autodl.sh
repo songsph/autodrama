@@ -74,7 +74,14 @@ pip_install -r requirements.txt
 
 if [ "$WITH_GPU" = "1" ]; then
   echo "==> 3/6 安装 GPU 渲染依赖（torch/diffusers，较大）"
-  pip_install -r requirements-gpu.txt
+  # insightface / onnxruntime-gpu 在某些算力（如 sm_120）上会编译失败，
+  # 它们只服务于候选自动选优，装不上不该中断整条流水线。
+  pip_install -r requirements-gpu.txt \
+    || echo "[warn] 部分 GPU 依赖未装上（不影响出图，候选自动选优会退化为人工选）"
+  echo "    校验核心渲染依赖……"
+  python3 -c "import diffusers, transformers, accelerate" \
+    || { echo "核心渲染依赖缺失，请手动 pip install diffusers transformers accelerate"; exit 1; }
+  echo "    核心依赖 OK"
 else
   echo "==> 3/6 跳过 GPU 依赖（跑渲染前需要：bash setup_autodl.sh --gpu）"
 fi
