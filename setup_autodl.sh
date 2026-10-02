@@ -46,10 +46,11 @@ fi
 
 echo "==> 0/6 环境自检"
 python3 --version || { echo "缺少 python3"; exit 1; }
-if command -v nvidia-smi >/dev/null 2>&1; then
-  nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+# 无卡开机时 nvidia-smi 文件存在但无执行权限，故要真的跑通才算有卡
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 else
-  echo "未检测到 GPU（无卡开机模式）：装依赖没问题，但生成阶段必须开 GPU 实例"
+  echo "未检测到可用 GPU（无卡开机模式）：装依赖/下模型没问题，但生成阶段必须开 GPU 实例"
 fi
 
 echo "==> 1/6 安装 ffmpeg 与中文字体（合成必需；不装中文字体字幕会画不出汉字）"
@@ -96,7 +97,10 @@ for f in /usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc \
          /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc; do
   [ -f "$f" ] && FONT="$f" && break
 done
-[ -z "$FONT" ] && FONT=$(fc-list :lang=zh 2>/dev/null | head -1 | cut -d: -f1)
+# fc-list 可能不存在（字体包未装），探测失败不该终止脚本
+if [ -z "$FONT" ]; then
+  FONT=$(fc-list :lang=zh 2>/dev/null | head -1 | cut -d: -f1 || true)
+fi
 
 if [ ! -f .env ]; then
   {
