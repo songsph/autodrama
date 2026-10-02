@@ -1,0 +1,7 @@
+# 核心依赖（无 GPU 也能装，CLI / LLM / 合成流程需要）
+pydantic>=2.7
+openai>=1.0
+pyyaml>=6.0
+rich>=13.0
+pillow>=10.0
+python-dotenv>=1.0

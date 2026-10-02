@@ -1,0 +1,15 @@
+# GPU 渲染依赖（在 AutoDL / 本地有显卡的机器上安装）
+# 安装前请先确认 CUDA 与 torch 版本匹配（5090 建议 torch>=2.7 + CUDA12.8）
+-r requirements.txt
+
+# 图像生成（分镜首帧图）
+diffusers>=0.30
+transformers>=4.40
+accelerate>=0.30
+
+# 人脸相似度打分（镜头候选自动选优，保证人物一致性）
+insightface>=0.7
+onnxruntime-gpu>=1.18
+
+# 视频生成（按需二选一）
+# minimax-h3 / wan2.x 等请按各自仓库要求安装
