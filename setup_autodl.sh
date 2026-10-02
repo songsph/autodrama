@@ -18,12 +18,14 @@ set -e
 DATA_DIR=/root/autodl-tmp
 WITH_GPU=0
 WITH_MODELS=0
+WITH_TTS=0
 VIDEO=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --gpu)    WITH_GPU=1 ;;
     --models) WITH_GPU=1; WITH_MODELS=1 ;;
     --video)  WITH_GPU=1; VIDEO="${2:-wan}"; shift ;;
+    --tts)    WITH_GPU=1; WITH_TTS=1 ;;
   esac
   shift || true
 done
@@ -151,6 +153,39 @@ PY
   fi
 fi
 
+if [ "$WITH_TTS" = "1" ]; then
+  echo "下载 CosyVoice 配音模型与官方代码"
+  pip_install modelscope
+  python3 - "$MODEL_DIR" <<'PY'
+import sys
+root = sys.argv[1]
+try:
+    from modelscope import snapshot_download
+    for mid in ["iic/CosyVoice2-0.5B"]:
+        try:
+            p = snapshot_download(mid, cache_dir=root)
+            print("downloaded:", p)
+        except Exception as e:
+            print(f"[warn] {mid} 下载失败：{e}")
+            print(f"      可手动：modelscope download --model {mid} --local_dir {root}")
+except ImportError:
+    print("modelscope 未安装")
+PY
+  if [ ! -d "$DATA_DIR/repos/CosyVoice" ]; then
+    git clone --depth 1 https://github.com/FunAudioLLM/CosyVoice \
+      "$DATA_DIR/repos/CosyVoice" 2>/dev/null \
+      || echo "[warn] clone 失败，请手动下载后设置 AUTODRAMA_COSYVOICE_DIR"
+  fi
+  {
+    echo "AUTODRAMA_TTS=worker"
+    echo "AUTODRAMA_TTS_BACKEND=cosyvoice"
+    echo "AUTODRAMA_COSYVOICE_DIR=$DATA_DIR/repos/CosyVoice"
+    echo "AUTODRAMA_COSYVOICE_MODEL=$MODEL_DIR/iic/CosyVoice2-0.5B"
+  } >> .env
+  echo "还需装官方依赖（CosyVoice 版本迭代快，依赖冲突请优先用命令模板兜底）："
+  echo "  cd $DATA_DIR/repos/CosyVoice && pip install -r requirements.txt"
+fi
+
 if [ "$WITH_MODELS" = "1" ]; then
   echo "下载出图模型 SDXL（角色/场景首帧图）"
   python3 - "$MODEL_DIR" <<'PY'
@@ -183,6 +218,14 @@ cat <<EOF
          export AUTODRAMA_H3_CMD='python \$AUTODRAMA_H3_DIR/infer.py --image "{image}" --prompt "{prompt}" --out "{out}"'
   所有视频生成都走 scripts/video_worker.py 批量入口：一次加载模型跑完整集，
   不会每个镜头都重载权重（那会多烧半小时 GPU 时间）。
+
+配音：
+  export AUTODRAMA_TTS=worker            # CosyVoice 批量配音（一次加载模型跑完整集）
+  音色一致性：每个角色固定一份参考音频，全剧复用同一个 voice_sample。
+
+角色 LoRA（主角专用，一致性最强）：
+  python3 scripts/train_lora.py --project demo --character lin_wan --update-project
+  数据来源是本项目的角色候选图/黄金参考图，prompt 直接用角色卡里的【锁定】外貌词。
 
 安全提醒：
   - 跑完在控制台【关机】，关机不丢数据、停止计费

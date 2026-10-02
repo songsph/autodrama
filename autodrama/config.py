@@ -103,6 +103,10 @@ class Config:
     ip_adapter_repo = env("AUTODRAMA_IP_ADAPTER", "h94/IP-Adapter")
     ip_adapter_scale = float(env("AUTODRAMA_IP_SCALE", "0.85"))
     scene_init_strength = float(env("AUTODRAMA_SCENE_INIT_STRENGTH", "0.35"))
+
+    # ---- 角色 LoRA（主角专用，一致性最强手段）----
+    lora_dir = env("AUTODRAMA_LORA_DIR") or str(model_dir / "loras")
+    lora_weight = float(env("AUTODRAMA_LORA_WEIGHT", "0.8"))
     steps = int(env("AUTODRAMA_STEPS", "28"))
     guidance = float(env("AUTODRAMA_GUIDANCE", "7.0"))
 
