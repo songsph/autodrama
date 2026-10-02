@@ -12,11 +12,15 @@
 
 from __future__ import annotations
 
+import json
+import os
 import shlex
 import subprocess
+import sys
+import tempfile
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import cfg
 
@@ -25,6 +29,32 @@ def has_ffmpeg() -> bool:
     from shutil import which
     p = Path(cfg.ffmpeg)
     return p.is_file() or which(cfg.ffmpeg) is not None
+
+
+def probe_duration(path: Path) -> float:
+    """读音频/视频时长：优先 ffprobe，缺失时退回 ffmpeg -i 解析。
+
+    Windows 的 ffmpeg 整合包经常只有 ffmpeg.exe 没有 ffprobe.exe，
+    直接调用 ffprobe 会抛 FileNotFoundError，所以必须有回退。
+    """
+    import re as _re
+    if cfg.ffprobe:
+        try:
+            r = subprocess.run([cfg.ffprobe, "-v", "error", "-show_entries",
+                                "format=duration", "-of", "csv=p=0", str(path)],
+                               capture_output=True, text=True)
+            return float(r.stdout.strip())
+        except Exception:
+            pass
+    try:
+        r = subprocess.run([cfg.ffmpeg, "-i", str(path)], capture_output=True,
+                           text=True, encoding="utf-8", errors="ignore")
+        m = _re.search(r"Duration:\s*(\d+):(\d+):([\d.]+)", r.stderr)
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return 0.0
 
 
 def run(cmd: List[str]) -> None:
@@ -234,6 +264,42 @@ class CommandVideoProvider(VideoProvider):
         return out
 
 
+class WorkerVideoProvider(VideoProvider):
+    """批量视频生成：一次加载模型，跑完一整集所有镜头。
+
+    直接对每个镜头起一次官方推理脚本也能出片，但每次都要重载权重（1~3 分钟），
+    一集 18 个镜头光加载就要烧掉半小时 GPU 计费时间。
+    所以走 scripts/video_worker.py 的 --batch 入口：加载一次，逐个生成。
+    """
+
+    def __init__(self) -> None:
+        self.worker = Path(__file__).resolve().parents[1] / "scripts" / "video_worker.py"
+
+    @staticmethod
+    def _task(out: str, keyframe: str, prompt: str, duration: float,
+              last_frame: Optional[str]) -> Dict[str, Any]:
+        return {"out": out, "image": keyframe, "last": last_frame or "",
+                "prompt": prompt, "duration": duration,
+                "width": cfg.width, "height": cfg.height, "fps": cfg.fps}
+
+    def generate_batch(self, tasks: List[Dict[str, Any]]) -> None:
+        if not self.worker.is_file():
+            raise RuntimeError(f"找不到 worker 脚本：{self.worker}")
+        fd, tmp = tempfile.mkstemp(prefix="autodrama_video_", suffix=".json")
+        os.close(fd)
+        try:
+            Path(tmp).write_text(json.dumps(tasks, ensure_ascii=False), encoding="utf-8")
+            subprocess.run([sys.executable, str(self.worker), "--batch", tmp], check=True)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def generate(self, keyframe: str, prompt: str, duration: float,
+                 out: str = "", last_frame: Optional[str] = None) -> str:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        self.generate_batch([self._task(out, keyframe, prompt, duration, last_frame)])
+        return out
+
+
 # ------------------------------------------------------------------ 配音
 
 class TTSProvider(ABC):
@@ -272,15 +338,7 @@ class CommandTTSProvider(TTSProvider):
         Path(out).parent.mkdir(parents=True, exist_ok=True)
         run_cmd_template(cfg.tts_cmd, text=text, voice=voice_id or "",
                          emotion=emotion, out=out)
-        dur = 0.0
-        if Path(out).exists() and has_ffmpeg():
-            r = subprocess.run(
-                [cfg.ffprobe, "-v", "error", "-show_entries", "format=duration",
-                 "-of", "csv=p=0", str(out)], capture_output=True, text=True)
-            try:
-                dur = float(r.stdout.strip())
-            except ValueError:
-                dur = 0.0
+        dur = probe_duration(Path(out)) if Path(out).exists() else 0.0
         return out, dur or max(1.0, min(5.0, len(text) * 0.25))
 
 
@@ -315,9 +373,11 @@ def get_image() -> ImageProvider:
 
 
 def get_video() -> VideoProvider:
-    # 视频模型生态变化快，统一走 command 模板（local 视作 command 的别名）
-    if cfg.video_backend in ("local", "command"):
+    # 视频模型生态变化快：command 走纯命令模板，worker 走批量入口（推荐）
+    if cfg.video_backend == "command":
         return CommandVideoProvider()
+    if cfg.video_backend in ("local", "worker", "wan", "h3"):
+        return WorkerVideoProvider()
     return MockVideoProvider()
 
 

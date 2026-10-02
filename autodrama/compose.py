@@ -156,11 +156,17 @@ def compose_shot(shot: Shot, out: Path) -> Path:
     if sub:
         vf += "," + sub
 
-    cmd = [FFMPEG, "-y", *inp, "-t", f"{duration:.2f}", "-vf", vf,
-           "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    # 选项必须放在【所有输入之后】：ffmpeg 会把 -vf/-c:v 之类的选项归属于
+    # 其后出现的那个文件，若音频 -i 排在后面，滤镜会被误当成音频的输入选项而报错。
+    cmd = [FFMPEG, "-y", *inp]
     if audio is not None:
         cmd += ["-i", str(audio)]
-    cmd += ["-shortest", "-r", str(cfg.fps), str(tmp)]
+    cmd += ["-t", f"{duration:.2f}", "-vf", vf,
+            "-c:v", "libx264", "-preset", "medium", "-pix_fmt", "yuv420p"]
+    if audio is not None:
+        # 视频自带音轨时也要以配音为准，故显式 map
+        cmd += ["-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-shortest"]
+    cmd += ["-r", str(cfg.fps), str(tmp)]
     _run(cmd)
 
     # 没有配音就补静音，保证 concat 时所有片段都有音轨

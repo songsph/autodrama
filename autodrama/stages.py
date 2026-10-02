@@ -220,7 +220,8 @@ def _concat_audio(paths: List[Path], out: Path) -> Path:
     lst = out.parent / "audio_list.txt"
     lst.write_text("\n".join(f"file '{p.as_posix()}'" for p in paths), encoding="utf-8")
     import subprocess
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
+    # 必须用 cfg.ffmpeg：Windows 整合包通常不进 PATH，硬编码 "ffmpeg" 会 WinError 2
+    subprocess.run([cfg.ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", str(lst),
                     "-c", "copy", str(out)], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return out
@@ -320,20 +321,38 @@ def stage_video(proj: Project, ep_index: int) -> Episode:
     ep = store.get_episode(proj, ep_index)
     vp = providers.get_video()
     shots = ep.shots
-    n = 0
+
+    # 先收集所有待生成镜头（含首尾帧串联：下一镜首帧作为本镜收束帧）
+    pending = []
     for i, sh in enumerate(shots):
         if sh.clip and Path(sh.clip).exists():
             continue
         if not sh.keyframe:
             print(f"[skip] {sh.id} 缺少首帧图")
             continue
-        # 首尾帧串联：用下一个镜头的首帧作为本镜头的收束帧，衔接更自然
         last_frame = shots[i + 1].keyframe if i + 1 < len(shots) else None
-        out = store.asset_path(proj, "clips", f"{sh.id}.mp4")
-        vp.generate(sh.keyframe, sh.video_prompt, sh.duration, str(out), last_frame)
-        sh.clip = str(out)
-        sh.status = "clip"
-        n += 1
+        pending.append((sh, store.asset_path(proj, "clips", f"{sh.id}.mp4"), last_frame))
+
+    n = 0
+    if pending and hasattr(vp, "generate_batch"):
+        # 批量：一次加载模型跑完所有镜头，省掉每镜头 1~3 分钟的重复加载
+        print(f"[batch] 批量生成 {len(pending)} 个镜头（一次加载模型）")
+        vp.generate_batch([
+            {"out": str(out), "image": sh.keyframe, "last": last or "",
+             "prompt": sh.video_prompt, "duration": sh.duration,
+             "width": cfg.width, "height": cfg.height, "fps": cfg.fps}
+            for sh, out, last in pending])
+        for sh, out, _ in pending:
+            if out.exists():
+                sh.clip = str(out)
+                sh.status = "clip"
+                n += 1
+    else:
+        for sh, out, last in pending:
+            vp.generate(sh.keyframe, sh.video_prompt, sh.duration, str(out), last)
+            sh.clip = str(out)
+            sh.status = "clip"
+            n += 1
     ep.status = "clipped"
     proj.stage = f"video@{ep_index}"
     store.save(proj)

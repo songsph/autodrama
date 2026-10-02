@@ -126,7 +126,35 @@ MVP 阶段建议先用 480p，跑顺了再上 720p。
 |---|---|---|
 | `mock` | 离线占位图/静音，纯跑流程 | 开发调试、没有 GPU 时 |
 | `local` | 内置实现：diffusers + IP-Adapter | 图像生成（已实现） |
-| `command` | 调用你自己的命令模板 | 视频/配音/口型（推荐，适配任意模型） |
+| `worker` | 调 `scripts/video_worker.py`，**一次加载模型批量跑完整集** | 视频生成（推荐） |
+| `command` | 调用你自己的命令模板 | 视频/配音/口型（适配任意模型） |
+
+### 视频：worker 批量模式（推荐）
+
+视频模型加载一次要 1~3 分钟。逐镜头起一个进程，一集 18 镜就多烧半小时 GPU 计费时间。
+所以流水线把所有镜头打包成任务清单，交给 worker 一次加载、逐个生成：
+
+```bash
+export AUTODRAMA_VIDEO=worker
+export AUTODRAMA_VIDEO_BACKEND=wan     # wan = diffusers 图生视频；h3 = MiniMax H3
+export AUTODRAMA_VIDEO_MODEL=/root/autodl-tmp/models/Wan-AI/Wan2.2-I2V-A14B
+```
+
+`--backend h3` 走官方推理脚本（其接口经常变），可用命令模板覆盖：
+
+```bash
+export AUTODRAMA_H3_DIR=/root/autodl-tmp/repos/MiniMax-H3
+export AUTODRAMA_H3_CMD='python $AUTODRAMA_H3_DIR/infer.py --image "{image}" --prompt "{prompt}" --out "{out}"'
+```
+
+AutoDL 上一键装好（含模型下载）：
+
+```bash
+bash setup_autodl.sh --gpu --video wan     # 或 --video h3
+```
+
+> H3 的 FP16 全量权重约 65G，32G 显存放不下，请选择 fp8/量化变体或开启 CPU offload；
+> 想先跑通流程，建议用 `wan`（Wan2.2 I2V），接口稳定。
 
 ### 图像：local 模式
 
@@ -250,6 +278,7 @@ autodrama/
 - [x] 镜头候选自动生成 + 人脸相似度自动选优
 - [x] Gradio 可视化界面
 - [x] Windows D 盘一键安装脚本
+- [x] AutoDL 一键脚本：视频模型下载（Wan2.2 / MiniMax H3）+ 批量 worker
 - [ ] 角色 LoRA 训练脚本
 - [ ] BGM / 音效自动生成
 - [ ] 视频片段自动打分（清晰度/闪烁/形变检测）
