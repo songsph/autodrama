@@ -98,16 +98,22 @@ else
 fi
 
 if ! grep -q "DEEPSEEK_API_KEY=sk" .env 2>/dev/null; then
-  echo ""
-  echo "请粘贴 DeepSeek API Key（输入不回显，只写入本机 .env，不会进 GitHub）："
-  read -s DSK
-  if [ -n "$DSK" ]; then
-    echo "DEEPSEEK_API_KEY=$DSK" >> .env
-    echo "已写入 .env"
+  if [ -n "${DEEPSEEK_API_KEY:-}" ]; then
+    # 非交互：DEEPSEEK_API_KEY=sk-xxx bash setup_autodl.sh --gpu
+    echo "DEEPSEEK_API_KEY=$DEEPSEEK_API_KEY" >> .env
+    echo "已用环境变量中的 DeepSeek Key 写入 .env"
   else
-    echo "未输入，稍后可手动：echo 'DEEPSEEK_API_KEY=sk-xxx' >> .env"
+    echo ""
+    echo "请粘贴 DeepSeek API Key（输入不回显，只写入本机 .env，不会进 GitHub）："
+    read -s DSK
+    if [ -n "$DSK" ]; then
+      echo "DEEPSEEK_API_KEY=$DSK" >> .env
+      echo "已写入 .env"
+    else
+      echo "未输入，稍后可手动：echo 'DEEPSEEK_API_KEY=sk-xxx' >> .env"
+    fi
+    unset DSK
   fi
-  unset DSK
 fi
 
 echo "==> 6/6 模型下载"
