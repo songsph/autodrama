@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import compose, prompt_builder, prompts, providers, review, select, store
 from .config import OUTPUT_DIR, cfg
@@ -231,22 +231,47 @@ def stage_tts(proj: Project, ep_index: int) -> Episode:
     ep = store.get_episode(proj, ep_index)
     tts = providers.get_tts()
     total = 0.0
+
+    # 1) 先收集全集台词，支持批量时一次加载模型跑完（TTS 加载同样要几十秒）
+    tasks: List[Dict[str, Any]] = []
     for sh in ep.shots:
-        if not sh.dialogue:
-            continue
-        if sh.audio and Path(sh.audio).exists():
-            continue
-        audios: List[Path] = []
-        dur = 0.0
         for j, d in enumerate(sh.dialogue):
             ch = next((c for c in proj.characters if c.id == d.character
                        or c.name == d.character), None)
             out = store.asset_path(proj, "audio", f"{sh.id}_{j}.wav")
-            _, seg = tts.synth(d.text, ch.voice_id if ch else None, d.emotion, str(out))
+            if out.exists():
+                continue
+            tasks.append({"out": str(out), "text": d.text,
+                          "voice": (ch.voice_sample or ch.voice_id) if ch else "",
+                          "speaker": ch.name if ch else d.character,
+                          "emotion": d.emotion})
+    if tasks and hasattr(tts, "generate_batch"):
+        print(f"[batch] 批量合成 {len(tasks)} 句配音（一次加载模型）")
+        tts.generate_batch(tasks)
+    elif tasks:
+        for t in tasks:
+            tts.synth(t["text"], t["voice"], t["emotion"], t["out"])
+
+    # 2) 逐镜头合并音频，并以音频时长反推镜头时长（先配音后视频的核心闭环）
+    for sh in ep.shots:
+        if not sh.dialogue:
+            continue
+        if sh.audio and Path(sh.audio).exists():
+            total += sh.duration
+            continue
+        audios: List[Path] = []
+        dur = 0.0
+        for j, d in enumerate(sh.dialogue):
+            out = store.asset_path(proj, "audio", f"{sh.id}_{j}.wav")
+            if not out.exists():
+                continue
+            seg = providers.probe_duration(out)
             d.duration = seg
             d.audio = str(out)
             audios.append(out)
             dur += seg
+        if not audios:
+            continue
         merged = store.asset_path(proj, "audio", f"{sh.id}.wav")
         if len(audios) == 1 or not providers.has_ffmpeg():
             merged.write_bytes(audios[0].read_bytes())   # 无 ffmpeg 时降级：只保留首句
@@ -265,6 +290,15 @@ def stage_tts(proj: Project, ep_index: int) -> Episode:
 
 # ------------------------------------------------------------------ 首帧静帧图（批量）
 
+def _lora_for(proj: Project, sh: Shot) -> Optional[str]:
+    """本镜头主角的 LoRA 路径（角色卡.lora，由 train_lora.py 训练得到）。"""
+    for cid in (sh.characters or []):
+        ch = next((c for c in proj.characters if c.id == cid), None)
+        if ch and ch.lora:
+            return ch.lora
+    return None
+
+
 def stage_keyframes(proj: Project, ep_index: int, candidates: Optional[int] = None) -> Episode:
     """批量生成首帧静帧图（按模型批处理，绝不逐镜头切换模型）。
 
@@ -278,13 +312,15 @@ def stage_keyframes(proj: Project, ep_index: int, candidates: Optional[int] = No
         if sh.keyframe and Path(sh.keyframe).exists():
             continue
         char_refs, scene_ref = prompt_builder.ref_images_for(proj, sh)
+        lora = _lora_for(proj, sh)
 
         if k > 1:
             paths: List[str] = []
             for c in range(k):
                 out = store.asset_path(proj, "keyframes", f"{sh.id}_{c}.png")
                 r = _safe_image(ip.generate, sh.image_prompt, "", char_refs, scene_ref,
-                                cfg.width, cfg.height, 12345 + sh.index * 100 + c, str(out))
+                                cfg.width, cfg.height, 12345 + sh.index * 100 + c, str(out),
+                                lora=lora)
                 if r:
                     paths.append(r)
             if not paths:
@@ -300,7 +336,7 @@ def stage_keyframes(proj: Project, ep_index: int, candidates: Optional[int] = No
         else:
             out = store.asset_path(proj, "keyframes", f"{sh.id}.png")
             r = _safe_image(ip.generate, sh.image_prompt, "", char_refs, scene_ref,
-                            cfg.width, cfg.height, 12345 + sh.index, str(out))
+                            cfg.width, cfg.height, 12345 + sh.index, str(out), lora=lora)
             if not r:
                 continue
             sh.keyframe = r

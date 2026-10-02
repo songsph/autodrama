@@ -169,6 +169,35 @@ export AUTODRAMA_SCENE_INIT_STRENGTH=0.35   # 用定场图做 img2img 底图
 - **角色** → IP-Adapter 注入黄金参考图，保证"是同一个人"
 - **场景** → 定场图当 img2img 底图，保证"是同一个地方、同样的光"
 
+### 配音：CosyVoice 批量模式
+
+音色一致性的做法和人物一样：**每个角色固定一份参考音频，全剧复用同一个 `voice_sample`**。
+
+```bash
+export AUTODRAMA_TTS=worker
+export AUTODRAMA_TTS_BACKEND=cosyvoice
+export AUTODRAMA_COSYVOICE_DIR=/root/autodl-tmp/repos/CosyVoice
+export AUTODRAMA_COSYVOICE_MODEL=/root/autodl-tmp/models/iic/CosyVoice2-0.5B
+```
+
+AutoDL：`bash setup_autodl.sh --gpu --tts`（clone 官方代码 + 下载权重）。
+配音同样走批量入口 `scripts/tts_worker.py`，一次加载模型合成整集所有台词。
+
+> CosyVoice 版本迭代快、依赖容易冲突。跑不通就用命令模板兜底：`AUTODRAMA_TTS_CMD`。
+
+### 角色 LoRA：主角一致性的最强手段
+
+配角用「角色卡 + IP-Adapter」就够，**主角**值得训一个 LoRA：
+
+```bash
+python scripts/train_lora.py --project demo --character lin_wan --update-project
+```
+
+训练数据直接取自本项目的角色候选图/黄金参考图，prompt 用角色卡里的【锁定】外貌词
+——保证 LoRA 学到的就是角色卡描述的那个人。15~30 张图、1200 步，约 15~30 分钟。
+训完自动写回角色卡的 `lora` 字段，之后含该角色的镜头会自动启用 LoRA
+（多角色时切换 adapter，不需要重新加载权重）。
+
 ### 视频 / 配音 / 口型：command 模式
 
 不用改代码，配一条命令模板即可接入任意模型：

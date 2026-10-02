@@ -84,7 +84,7 @@ class ImageProvider(ABC):
     def generate(self, prompt: str, negative: str = "",
                  char_refs: Optional[List[str]] = None, scene_ref: Optional[str] = None,
                  width: int = 720, height: int = 1280, seed: int = 0,
-                 out: str = "") -> str:
+                 out: str = "", lora: Optional[str] = None) -> str:
         ...
 
 
@@ -94,7 +94,7 @@ class MockImageProvider(ImageProvider):
     def generate(self, prompt: str, negative: str = "",
                  char_refs: Optional[List[str]] = None, scene_ref: Optional[str] = None,
                  width: int = 720, height: int = 1280, seed: int = 0,
-                 out: str = "") -> str:
+                 out: str = "", lora: Optional[str] = None) -> str:
         from PIL import Image, ImageDraw, ImageFont
         img = Image.new("RGB", (width, height), (26, 28, 34))
         d = ImageDraw.Draw(img)
@@ -128,6 +128,7 @@ class LocalImageProvider(ImageProvider):
     """
 
     _pipe = None
+    _adapters: list = []
 
     def _load(self):
         if LocalImageProvider._pipe is not None:
@@ -138,28 +139,61 @@ class LocalImageProvider(ImageProvider):
         pipe = StableDiffusionXLPipeline.from_pretrained(
             cfg.image_model, torch_dtype=torch.float16, use_safetensors=True)
         if torch.cuda.is_available():
-            pipe = pipe.to("cuda")
-            try:
-                pipe.enable_model_cpu_offload()      # 显存紧张时的保险开关
-            except Exception:
-                pass
+            if os.environ.get("AUTODRAMA_LOW_VRAM", "0") == "1":
+                try:
+                    pipe.enable_model_cpu_offload()   # 只有显存紧张才开，否则白白变慢
+                except Exception:
+                    pipe = pipe.to("cuda")
+            else:
+                pipe = pipe.to("cuda")
         try:
             pipe.load_ip_adapter(cfg.ip_adapter_repo, subfolder="sdxl_models",
                                  weight_name="ip-adapter_sdxl.bin")
             print("[info] IP-Adapter 已加载（角色一致性开启）")
         except Exception as e:
             print(f"[warn] IP-Adapter 加载失败，人物一致性会下降：{e}")
+        LocalImageProvider._adapters = self._load_loras(pipe)
         LocalImageProvider._pipe = pipe
         return pipe
+
+    @staticmethod
+    def _load_loras(pipe) -> list:
+        """加载 LoRA 目录下所有角色 LoRA，文件名即角色 id（如 lin_wan.safetensors）。
+
+        一次性全装、按需开关：切换 adapter 不需要重新加载权重，所以多主角也不卡。
+        """
+        names = []
+        if not cfg.lora_dir or not Path(cfg.lora_dir).is_dir():
+            return names
+        for f in sorted(Path(cfg.lora_dir).glob("*.safetensors")):
+            try:
+                pipe.load_lora_weights(str(f), adapter_name=f.stem)
+                names.append(f.stem)
+                print(f"[info] 角色 LoRA 已加载：{f.stem}")
+            except Exception as e:
+                print(f"[warn] LoRA {f.name} 加载失败：{e}")
+        return names
 
     def generate(self, prompt: str, negative: str = "",
                  char_refs: Optional[List[str]] = None, scene_ref: Optional[str] = None,
                  width: int = 720, height: int = 1280, seed: int = 0,
-                 out: str = "") -> str:
+                 out: str = "", lora: Optional[str] = None) -> str:
         import torch
         from PIL import Image
 
         pipe = self._load()
+
+        # 角色 LoRA：主角一致性的最强手段（训练见 scripts/train_lora.py）
+        adapters = LocalImageProvider._adapters
+        if adapters:
+            name = Path(lora).stem if lora else ""
+            try:
+                if name in adapters:
+                    pipe.set_adapters([name], [cfg.lora_weight])
+                else:
+                    pipe.set_adapters(adapters, [0.0] * len(adapters))  # 无主角的镜头关闭
+            except Exception as e:
+                print(f"[warn] LoRA 切换失败：{e}")
         device = "cuda" if torch.cuda.is_available() else "cpu"
         kw = dict(prompt=prompt, negative_prompt=negative,
                   num_inference_steps=cfg.steps, guidance_scale=cfg.guidance,
@@ -203,7 +237,7 @@ class CommandImageProvider(ImageProvider):
     def generate(self, prompt: str, negative: str = "",
                  char_refs: Optional[List[str]] = None, scene_ref: Optional[str] = None,
                  width: int = 720, height: int = 1280, seed: int = 0,
-                 out: str = "") -> str:
+                 out: str = "", lora: Optional[str] = None) -> str:
         if not cfg.image_cmd:
             raise RuntimeError("AUTODRAMA_IMAGE_CMD 未配置")
         Path(out).parent.mkdir(parents=True, exist_ok=True)
@@ -381,9 +415,39 @@ def get_video() -> VideoProvider:
     return MockVideoProvider()
 
 
+class WorkerTTSProvider(TTSProvider):
+    """批量配音：一次加载 TTS 模型，合成整集所有台词。
+
+    音色一致性靠零样本克隆：每个角色固定一份参考音频，全剧复用（voice_sample）。
+    """
+
+    def __init__(self) -> None:
+        self.worker = Path(__file__).resolve().parents[1] / "scripts" / "tts_worker.py"
+
+    def generate_batch(self, tasks: List[Dict[str, Any]]) -> None:
+        if not self.worker.is_file():
+            raise RuntimeError(f"找不到 worker 脚本：{self.worker}")
+        fd, tmp = tempfile.mkstemp(prefix="autodrama_tts_", suffix=".json")
+        os.close(fd)
+        try:
+            Path(tmp).write_text(json.dumps(tasks, ensure_ascii=False), encoding="utf-8")
+            subprocess.run([sys.executable, str(self.worker), "--batch", tmp], check=True)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def synth(self, text: str, voice_id: Optional[str], emotion: str,
+              out: str = "") -> Tuple[str, float]:
+        Path(out).parent.mkdir(parents=True, exist_ok=True)
+        self.generate_batch([{"out": out, "text": text, "voice": voice_id or "",
+                              "emotion": emotion}])
+        return out, probe_duration(Path(out))
+
+
 def get_tts() -> TTSProvider:
-    if cfg.tts_backend in ("local", "command"):
+    if cfg.tts_backend == "command":
         return CommandTTSProvider()
+    if cfg.tts_backend in ("local", "worker", "cosyvoice"):
+        return WorkerTTSProvider()
     return MockTTSProvider()
 
 
